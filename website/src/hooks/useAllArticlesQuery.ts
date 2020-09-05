@@ -12,9 +12,12 @@ export const useAllArticlesQuery = () => {
               duration
               staticLink
               experimental
+              hidePage
+              codeStyle
             }
             fields {
               slug
+              modSlug
             }
           }
         }

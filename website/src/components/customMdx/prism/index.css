@@ -28,7 +28,8 @@ pre[class*='language-'] code {
   hyphens: none;
 
   border-radius: 8px;
-  display: table;
+  display: inline-grid;
+  grid-template-rows: max-content;
   width: 100%;
   overflow: auto;
 }
@@ -52,9 +53,9 @@ pre[class*='language-'] {
   white-space: normal;
 }
 
-code.inline-code {
+code.inline-code, .inline-code, inlinecode {
   display: inline;
-  vertical-align: middle;
+  vertical-align: baseline;
   padding: 0.2em 0.2em 0.3em 0.2em;
   background: var(--code-bgd-color);
   font-size: 14px;
@@ -66,6 +67,10 @@ code.inline-code {
   border-radius: 5px;
   color: var(--main-font-color);
   font-weight: 500;
+}
+
+.inline-code {
+  background-color: var(--border-color);
 }
 
 .token.comment,

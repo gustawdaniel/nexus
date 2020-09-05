@@ -1,10 +1,10 @@
 import { stripIndent } from 'common-tags'
 import * as fs from 'fs-jetpack'
-import * as path from 'path'
+import * as Path from 'path'
 import prompts from 'prompts'
 import { PackageJson } from 'type-fest'
 import { Command } from '../../../lib/cli'
-import { rightOrFatal } from '../../../lib/glocal/utils'
+import { rightOrFatal } from '../../../lib/utils'
 import * as Layout from '../../../lib/layout'
 import { tsconfigTemplate } from '../../../lib/layout/tsconfig'
 import { rootLogger } from '../../../lib/nexus-logger'
@@ -80,10 +80,10 @@ export async function runBootstrapper(configInput?: Partial<ConfigInput>): Promi
   const internalConfig: InternalConfig = {
     projectName: projectName,
     projectRoot: process.cwd(),
-    sourceRoot: path.join(process.cwd(), 'api'),
+    sourceRoot: Path.join(process.cwd(), 'api'),
     ...configInput,
   }
-  const nexusVersion = await getNexusVersion()
+  const nexusVersion = getNexusVersion()
   const packageManager = await getPackageManager(internalConfig.projectRoot)
 
   if (packageManager === 'sigtermed') {
@@ -213,7 +213,7 @@ async function getPackageManager(projectRoot: string): Promise<PackageManager.Pa
   return packageManager
 }
 
-async function getNexusVersion(): Promise<string> {
+function getNexusVersion(): string {
   const nexusVersionEnvVar = process.env.CREATE_APP_CHOICE_NEXUS_VERSION
   const nexusVersion = nexusVersionEnvVar ?? `${ownPackage.version}`
   return nexusVersion
@@ -386,7 +386,7 @@ const templates: Record<TemplateName, TemplateCreator> = {
     return {
       files: [
         {
-          path: path.join(internalConfig.sourceRoot, 'graphql.ts'),
+          path: Path.join(internalConfig.sourceRoot, 'graphql.ts'),
           content: stripIndent`
             import { schema } from "nexus";
       
@@ -444,7 +444,7 @@ const templates: Record<TemplateName, TemplateCreator> = {
     return {
       files: [
         {
-          path: path.join(internalConfig.sourceRoot, 'app.ts'),
+          path: Path.join(internalConfig.sourceRoot, 'app.ts'),
           content: stripIndent`
           import { use } from 'nexus'
           import { prisma } from 'nexus-plugin-prisma'
@@ -461,8 +461,8 @@ const templates: Record<TemplateName, TemplateCreator> = {
  * Scaffold a new nexus project from scratch
  */
 async function scaffoldBaseFiles(options: InternalConfig) {
-  const appEntrypointPath = path.join(options.sourceRoot, 'app.ts')
-  const sourceRootRelative = path.relative(options.projectRoot, options.sourceRoot)
+  const appEntrypointPath = Path.join(options.sourceRoot, 'app.ts')
+  const sourceRootRelative = Path.relative(options.projectRoot, options.sourceRoot)
 
   await Promise.all([
     // Empty app and graphql module.
@@ -514,7 +514,7 @@ async function scaffoldBaseFiles(options: InternalConfig) {
       // use(prisma())
     `
     ),
-    fs.writeAsync(path.join(options.sourceRoot, 'graphql.ts'), ''),
+    fs.writeAsync(Path.join(options.sourceRoot, 'graphql.ts'), ''),
     // An exhaustive .gitignore tailored for Node can be found here:
     // https://github.com/github/gitignore/blob/master/Node.gitignore
     // We intentionally stay minimal here, as we want the default ignore file
@@ -530,9 +530,10 @@ async function scaffoldBaseFiles(options: InternalConfig) {
         lerna-debug.log*
       `
     ),
-    fs.writeAsync(path.join(options.projectRoot, 'package.json'), {
+    fs.writeAsync(Path.join(options.projectRoot, 'package.json'), {
       name: options.projectName,
       license: 'UNLICENSED',
+      version: '0.0.0',
       dependencies: {},
       scripts: {
         format: "npx prettier --write './**/*.{ts,md}'",
@@ -554,7 +555,7 @@ async function scaffoldBaseFiles(options: InternalConfig) {
       'tsconfig.json',
       tsconfigTemplate({
         sourceRootRelative,
-        outRootRelative: Layout.DEFAULT_BUILD_FOLDER_PATH_RELATIVE_TO_PROJECT_ROOT,
+        outRootRelative: Layout.DEFAULT_BUILD_DIR_PATH_RELATIVE_TO_PROJECT_ROOT,
       })
     ),
 
@@ -572,7 +573,7 @@ async function scaffoldBaseFiles(options: InternalConfig) {
               "protocol": "inspector",
               "runtimeExecutable": "\${workspaceRoot}/node_modules/.bin/nexus",
               "runtimeArgs": ["dev"],
-              "args": ["${path.relative(options.projectRoot, appEntrypointPath)}"],
+              "args": ["${Path.relative(options.projectRoot, appEntrypointPath)}"],
               "sourceMaps": true,
               "console": "integratedTerminal"
             }

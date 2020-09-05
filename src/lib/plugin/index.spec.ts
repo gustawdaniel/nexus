@@ -1,7 +1,7 @@
 import { isLeft } from 'fp-ts/lib/Either'
 import * as Path from 'path'
 import * as TC from '../test-context'
-import { repalceInObject } from '../utils'
+import { normalizePathsInData } from '../utils'
 import { importAndLoadTesttimePlugins } from './load'
 import { getPluginManifest } from './manifest'
 import { Dimension, Plugin, PluginWithoutSettings } from './types'
@@ -10,7 +10,7 @@ const ctx = TC.create(TC.tmpDir(), TC.fs())
 
 describe('manifest', () => {
   let plugin: Plugin
-  const run = () => repalceInObject(ctx.tmpDir, '<project root>', getPluginManifest(plugin))
+  const run = () => normalizePathsInData(getPluginManifest(plugin), ctx.tmpDir, '<project root>')
 
   it('processes the manifest input with defaults', () => {
     ctx.fs.write('package.json', `{ "name": "foo", "main": "./dist/index.js" }`)
@@ -46,10 +46,11 @@ describe('manifest', () => {
             "plugin": Object {
               "packageJsonPath": "<project root>/package.json",
             },
-          },
-          "message": "Failed to read the the package.json file.
+            "reason": "Failed to read the the package.json file.
 
       Error: Cannot find module '<project root>/package.json' from 'src/lib/plugin/manifest.ts'",
+          },
+          "type": "get_manifest_error",
         },
       }
     `)
@@ -63,11 +64,13 @@ describe('manifest', () => {
         "_tag": "Left",
         "left": Object {
           "context": Object {
+            "name": undefined,
             "plugin": Object {
               "packageJsonPath": "<project root>/package.json",
             },
+            "reason": "\`name\` property is missing in the package.json",
           },
-          "message": "\`name\` property is missing in package.json",
+          "type": "get_manifest_error",
         },
       }
     `)
@@ -85,8 +88,9 @@ describe('manifest', () => {
             "plugin": Object {
               "packageJsonPath": "<project root>/package.json",
             },
+            "reason": "\`main\` property is missing in the package.json",
           },
-          "message": "\`main\` property is missing in package.json",
+          "type": "get_manifest_error",
         },
       }
     `)

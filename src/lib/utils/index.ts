@@ -1,6 +1,13 @@
+import * as HTTP from 'http'
+import { clone, isArray, isPlainObject, isString } from 'lodash'
+import Module from 'module'
+import * as Net from 'net'
 import * as Path from 'path'
 import Git from 'simple-git/promise'
+import slash from 'slash'
 import { JsonObject, PackageJson, Primitive } from 'type-fest'
+
+export * from './either'
 
 export type MaybePromise<T = void> = T | Promise<T>
 
@@ -14,6 +21,10 @@ export type Param3<F> = F extends (p1: any, p2: any, p3: infer P3, ...args: any[
 
 /**
  * Represents a POJO. Prevents from allowing arrays and functions
+ *
+ * @remarks
+ *
+ * TypeScript interfaces will not be considered sub-types.
  */
 export type PlainObject = {
   [x: string]: Primitive | object
@@ -85,12 +96,13 @@ export declare type DeepRequired<T> = T extends (...args: any[]) => any
   ? DeepRequiredObject<T>
   : T
 
-export interface DeepRequiredArray<T> extends Array<DeepRequired<NonUndefined<T>>> {}
+export type ExcludeUndefined<A> = A extends undefined ? never : A
+
+export interface DeepRequiredArray<T> extends Array<DeepRequired<ExcludeUndefined<T>>> {}
 
 export declare type DeepRequiredObject<T> = {
-  [P in keyof T]-?: DeepRequired<NonUndefined<T[P]>>
+  [K in keyof T]-?: DeepRequired<ExcludeUndefined<T[K]>>
 }
-export declare type NonUndefined<A> = A extends undefined ? never : A
 
 /**
  * Guarantee the length of a given string, padding before or after with the
@@ -238,13 +250,64 @@ export function areWorkerThreadsAvailable(): boolean {
   }
 }
 
+/**
+ * Iterate through all values in a plain object and convert all paths into posix ones, and replace basePath if given and found with baesPathMask if given otherwise "<dynamic>".
+ *
+ * Special handling is given for errors, turning them into plain objects, stack and message properties dropped, enumerable props processed.
+ */
+export function normalizePathsInData<X>(x: X, basePath?: string, basePathMask?: string): X {
+  if (isString(x)) {
+    let x_: string = x
+    if (basePath) {
+      x_ = replaceEvery(x_, basePath, basePathMask ?? '<dynamic>')
+      x_ = replaceEvery(x_, slash(basePath), basePathMask ?? '<dynamic>')
+    }
+    x_ = replaceEvery(x_, Path.sep, Path.posix.sep)
+    return x_ as any
+  }
+
+  if (isArray(x)) {
+    return x.map((item) => {
+      return normalizePathsInData(item, basePath, basePathMask)
+    }) as any
+  }
+
+  if (isPlainObject(x)) {
+    const x_ = {} as any
+    for (const [k, v] of Object.entries(x)) {
+      x_[k] = normalizePathsInData(v, basePath, basePathMask)
+    }
+    return x_
+  }
+
+  if (x instanceof Error) {
+    const x_ = clone(x)
+    for (const [k, v] of Object.entries(x)) {
+      const anyx_ = x_ as any
+      anyx_[k] = normalizePathsInData(v, basePath, basePathMask)
+    }
+
+    return x_ as any
+  }
+
+  return x
+}
+
 // todo extends Json
 export function repalceInObject<C extends object>(
   dynamicPattern: string | RegExp,
   replacement: string,
   content: C
 ): C {
-  return JSON.parse(JSON.stringify(content).split(dynamicPattern).join(replacement))
+  return JSON.parse(
+    JSON.stringify(content)
+      .split(JSON.stringify(dynamicPattern).replace(/^"|"$/g, ''))
+      .join(replacement)
+      // Normalize snapshotted paths across OSs
+      // Namely turn Windows "\" into "/"
+      .split(Path.sep)
+      .join('/')
+  )
 }
 
 export function replaceEvery(str: string, dynamicPattern: string, replacement: string): string {
@@ -279,27 +342,33 @@ export function prettifyHost(host: string): string {
   return host === '::' ? 'localhost' : host
 }
 
+type UnPromisify<T> = T extends Promise<infer U> ? U : T
+
 /**
  * Makes sure, that there is only one execution at a time
  * and the last invocation doesn't get lost (tail behavior of debounce)
  * Mostly designed for watch mode
  */
-export function simpleDebounce<T extends (...args: any[]) => Promise<any>>(fn: T): T {
+export function simpleDebounce<T extends (...args: any[]) => Promise<any>>(
+  fn: T
+): (...args: Parameters<T>) => { type: 'result'; data: UnPromisify<ReturnType<T>> } | { type: 'executing' } {
   let executing = false
   let pendingExecution: any = null
+  let res: any
   return (async (...args: any[]) => {
     if (executing) {
       // if there's already an execution, make it pending
       pendingExecution = args
-      return null as any
+      return { type: 'executing' }
     }
     executing = true
-    await fn(...args).catch((e) => console.error(e))
+    res = await fn(...args).catch((e) => console.error(e))
     if (pendingExecution) {
-      await fn(...args).catch((e) => console.error(e))
+      res = await fn(...args).catch((e) => console.error(e))
       pendingExecution = null
     }
     executing = false
+    return { type: 'result', data: res }
   }) as any
 }
 
@@ -319,11 +388,29 @@ export function getPackageJsonMain(packageJson: PackageJson & { main: string }):
     : Path.dirname(packageJson.main)
 }
 
-/**
- * An error with additional contextual data.
- */
-export type ContextualError<Context extends Record<string, unknown> = {}> = Error & {
-  context: Context
+export type Exception = BaseException<'generic', any>
+
+export interface BaseException<T extends string, C extends SomeRecord> extends Error {
+  type: T
+  context: C
+}
+
+export function exceptionType<Type extends string, Context extends SomeRecord>(
+  type: Type,
+  messageOrTemplate: string | ((ctx: Context) => string)
+) {
+  // todo overload function (or two functions)
+  // make template optional
+  // if given, return factory that only accepts context
+  // if not given, return factory that accepts message + context
+  return (ctx: Context) => {
+    const e = new Error(
+      typeof messageOrTemplate === 'string' ? messageOrTemplate : messageOrTemplate(ctx)
+    ) as BaseException<Type, Context>
+    e.type = type
+    e.context = ctx
+    return e
+  }
 }
 
 /**
@@ -335,18 +422,21 @@ export type ContextualError<Context extends Record<string, unknown> = {}> = Erro
  * strongly typed with the Either contstruct, making it so the error contextual
  * data flows with inference through your program.
  */
-export function createContextualError<Context extends Record<string, unknown>>(
+export function exception<Context extends SomeRecord = {}>(
   message: string,
-  context: Context
-): ContextualError<Context> {
-  const e = new Error(message) as ContextualError<Context>
+  context?: Context
+): BaseException<'generic', Context> {
+  const e = new Error(message) as BaseException<'generic', Context>
 
   Object.defineProperty(e, 'message', {
     enumerable: true,
     value: e.message,
   })
 
-  e.context = context
+  if (context) {
+    e.context = context
+  }
+  e.type = 'generic'
 
   return e
 }
@@ -407,13 +497,60 @@ export function noop() {}
  * foo/bar -> foo/bar
  * ```
  * ```
+ * foo/bar.js -> foo/bar
+ * ```
+ * ```
  * foo/bar/index.js -> foo/bar
  * ```
  */
 export function prettyImportPath(id: string): string {
-  const { dir, name } = Path.parse(id)
+  const { dir, name, ext } = Path.parse(id)
 
   if (name === 'index') return dir
 
+  if (ext) {
+    return id.replace(ext, '')
+  }
+
   return id
+}
+
+type SomeRecord = Record<string, unknown>
+
+export function httpListen(server: HTTP.Server, options: Net.ListenOptions): Promise<void> {
+  return new Promise((res, rej) => {
+    server.listen(options, () => {
+      res()
+    })
+  })
+}
+
+export function httpClose(server: HTTP.Server): Promise<void> {
+  return new Promise((res, rej) => {
+    server.close((err) => {
+      if (err) {
+        rej(err)
+      } else {
+        res()
+      }
+    })
+  })
+}
+
+/**
+ * Run require resolve from the given path
+ */
+export function requireResolveFrom(moduleId: string, fromPath: string): string {
+  const resolvedPath = require.resolve(moduleId, {
+    paths: (Module as any)._nodeModulePaths(fromPath),
+  })
+
+  return slash(resolvedPath)
+}
+
+export function indent(str: string, len: number, char: string = ' ') {
+  return str
+    .split('\n')
+    .map((s) => char.repeat(len) + s)
+    .join('\n')
 }

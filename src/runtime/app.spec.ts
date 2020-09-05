@@ -1,11 +1,18 @@
-process.env.FORCE_COLOR = '0'
-
 import { log } from '@nexus/logger'
+import * as GraphQL from 'graphql'
+import * as HTTP from 'http'
+import 'jest-extended'
 import * as Lo from 'lodash'
-import { removeReflectionStage, setReflectionStage } from '../lib/reflection'
+import { inspect } from 'util'
+import { setReflectionStage, unsetReflectionStage } from '../lib/reflection'
 import * as App from './app'
+import * as Lifecycle from './lifecycle'
 
 let app: App.PrivateApp
+
+function dump(x: any) {
+  return inspect(x, { depth: null })
+}
 
 beforeEach(() => {
   app = App.create() as App.PrivateApp
@@ -21,12 +28,20 @@ describe('reset', () => {
       server: { path: '/bar' },
       schema: { connections: { foo: {} } },
     })
-    app.schema.objectType({ name: 'Foo', definition() {} })
+    app.schema.objectType({
+      name: 'Foo',
+      definition(t) {
+        t.string('ok')
+      },
+    })
+    app.on.start(() => {})
     app.assemble()
     app.reset()
     expect(app.settings.current.server.path).toEqual(app.settings.original.server.path)
-    expect(app.settings.current.schema.connections).toEqual(undefined)
-    expect(app.private.state).toEqual(originalAppState)
+    expect(app.settings.current.schema).toEqual(app.settings.original.schema)
+    // must dump because functions are not equal-able
+    expect(dump(app.private.state)).toEqual(dump(originalAppState))
+    expect(app.private.state.components.lifecycle).toEqual(Lifecycle.createLazyState())
   })
 
   it('calling before assemble is fine', () => {
@@ -44,7 +59,12 @@ describe('assemble', () => {
 
   beforeEach(() => {
     // avoid schema check error
-    app.schema.objectType({ name: 'Foo', definition() {} })
+    app.schema.objectType({
+      name: 'Foo',
+      definition(t) {
+        t.string('ok')
+      },
+    })
   })
 
   it('multiple calls is a noop', () => {
@@ -69,6 +89,40 @@ describe('assemble', () => {
   })
 })
 
+describe('lifecycle', () => {
+  beforeEach(() => {
+    app.settings.change({ server: { port: 7583 } })
+    app.schema.queryType({
+      definition(t) {
+        t.string('foo')
+      },
+    })
+  })
+  afterEach(async () => {
+    await app.stop()
+  })
+  describe('start', () => {
+    it('callback is called with data when app is started', async () => {
+      const fn = jest.fn()
+      app.on.start(fn)
+      app.assemble()
+      await app.start()
+      expect(fn.mock.calls[0][0].schema instanceof GraphQL.GraphQLSchema).toBeTrue()
+    })
+    it('if callback throws error then Nexus shows a nice error', async () => {
+      app.on.start(() => {
+        throw new Error('error from user code')
+      })
+      app.assemble()
+      expect(await app.start().catch((e: Error) => e)).toMatchInlineSnapshot(`
+        [Error: Lifecycle callback error on event "start":
+
+        error from user code]
+      `)
+    })
+  })
+})
+
 describe('checks', () => {
   const spy = createLogSpy()
 
@@ -85,18 +139,22 @@ describe('checks', () => {
   })
 })
 
-describe('server handlers', () => {
-  it('under reflection are noops', () => {
-    setReflectionStage('plugin')
-    const g = app.server.handlers.graphql as any
-    const p = app.server.handlers.playground as any
-    expect(g()).toBeUndefined()
-    expect(p()).toBeUndefined()
-    removeReflectionStage()
+describe('server', () => {
+  it('has raw.http to get access to underling node http server', () => {
+    expect(app.server.raw.http).toBeInstanceOf(HTTP.Server)
   })
 
-  // todo, process exit poop
-  it.todo('if accessed before assembly, and not under reflection, error')
+  describe('handlers', () => {
+    it('under reflection are noops', () => {
+      setReflectionStage('plugin')
+      const g = app.server.handlers.graphql as any
+      expect(g()).toBeUndefined()
+      unsetReflectionStage()
+    })
+
+    // todo, process exit poop
+    it.todo('if accessed before assembly, and not under reflection, error')
+  })
 })
 
 /**

@@ -1,10 +1,13 @@
 import { codeBlock } from 'common-tags'
+import { Either, isLeft } from 'fp-ts/lib/Either'
 import * as fs from 'fs-jetpack'
+import slash from 'slash'
 import { hardWriteFile } from '../fs'
 import * as Layout from '../layout'
 import { rootLogger } from '../nexus-logger'
-import { createTSProgram } from '../tsc'
-import { extractContextTypes, ExtractedContextTypes } from './extractor'
+import { createTSProject } from '../tsc'
+import { Exception, prettyImportPath } from '../utils'
+import { ContribType, extractContextTypes, ExtractedContextTypes } from './extractor'
 
 const log = rootLogger.child('addToContextExtractor')
 
@@ -15,17 +18,35 @@ export const NEXUS_DEFAULT_RUNTIME_CONTEXT_TYPEGEN_PATH = fs.path(
   'index.d.ts'
 )
 
+export const DEFAULT_CONTEXT_TYPES: ExtractedContextTypes = {
+  typeImports: [
+    {
+      name: 'ContextAdderLens',
+      modulePath: prettyImportPath(require.resolve('../../runtime/schema/schema')),
+      isExported: true,
+      isNode: false,
+    },
+  ],
+  types: [{ kind: 'ref', name: 'ContextAdderLens' }],
+}
+
 /**
  * Run the pure extractor and then write results to a typegen module.
  */
 export async function generateContextExtractionArtifacts(
   layout: Layout.Layout
-): Promise<ExtractedContextTypes> {
+): Promise<Either<Exception, ExtractedContextTypes>> {
   log.trace('starting context type extraction')
-  const program = createTSProgram(layout, { withCache: true })
-  const contextTypes = extractContextTypes(program.getProgram())
+  const errProject = createTSProject(layout, { withCache: true })
+  if (isLeft(errProject)) return errProject
+  const tsProject = errProject.right
+  const contextTypes = extractContextTypes(tsProject, DEFAULT_CONTEXT_TYPES)
 
-  await writeContextTypeGenFile(contextTypes)
+  if (isLeft(contextTypes)) {
+    return contextTypes
+  }
+
+  await writeContextTypeGenFile(contextTypes.right)
 
   log.trace('finished context type extraction', { contextTypes })
 
@@ -36,9 +57,13 @@ export async function generateContextExtractionArtifacts(
  * Output the context types to a typegen file.
  */
 export async function writeContextTypeGenFile(contextTypes: ExtractedContextTypes) {
-  const addToContextInterfaces = contextTypes.types
-    .map((result) => `interface Context ${result}`)
+  let addToContextInterfaces = contextTypes.types
+    .map(renderContextInterfaceForExtractedReturnType)
     .join('\n\n')
+
+  if (addToContextInterfaces.trim() === '') {
+    addToContextInterfaces = `interface Context {} // none\n\n`
+  }
 
   const content = codeBlock`
     import app from 'nexus'
@@ -57,12 +82,21 @@ export async function writeContextTypeGenFile(contextTypes: ExtractedContextType
 
     // The context types extracted from the app.
 
-    ${addToContextInterfaces.length > 0 ? addToContextInterfaces : `interface Context {}`}
+    ${addToContextInterfaces}
   `
 
   await hardWriteFile(NEXUS_DEFAULT_RUNTIME_CONTEXT_TYPEGEN_PATH, content)
 }
 
 function renderImport(input: { from: string; names: string[] }) {
-  return `import { ${input.names.join(', ')} } from '${input.from}'`
+  return `import { ${input.names.join(', ')} } from '${slash(input.from)}'`
+}
+
+function renderContextInterfaceForExtractedReturnType(contribType: ContribType): string {
+  switch (contribType.kind) {
+    case 'literal':
+      return `interface Context ${contribType.value}`
+    case 'ref':
+      return `interface Context extends ${contribType.name} {}`
+  }
 }

@@ -1,5 +1,5 @@
 import { stripIndent } from 'common-tags'
-import * as path from 'path'
+import * as Path from 'path'
 import { rootLogger } from '../nexus-logger'
 import { detectExecLayout, ExecScenario } from './detect-exec-layout'
 import { globalToLocalModule } from './utils'
@@ -43,7 +43,7 @@ export function setup({ run, toolName, depName, filename }: SetupInput): void {
   // use envar to boost perf, skip costly detection work
   if (!process.env.GLOBAL_LOCAL_HANDOFF) {
     log.trace('execLayout start')
-    const execLayout = detectExecLayout({ depName })
+    const execLayout = detectExecLayout({ depName, scriptPath: filename })
     log.trace('execLayout done', { execLayout })
 
     if (execLayout.toolProject && !execLayout.runningLocalTool) {
@@ -55,7 +55,7 @@ export function setup({ run, toolName, depName, filename }: SetupInput): void {
         process.env.GLOBAL_LOCAL_HANDOFF = 'true'
 
         globalToLocalModule({
-          localPackageDir: path.join(execLayout.project!.nodeModulesDir, depName),
+          localPackageDir: Path.join(execLayout.project!.nodeModulesDir, depName),
           globalPackageFilename: filename,
         })
         return // we're done, all up to local now
@@ -83,13 +83,13 @@ function glocalMissingLocalToolOnDiskMessage({
   // const packageManager = await createPackageManager(undefined, { projectRoot })
   //todo instead of "try your command again" write out what that command actually was
   return stripIndent`
-    The global ${toolName} CLI you invoked could not hand off to your project-local one becuase it wasn't on disk.
+    The global ${toolName} CLI you invoked could not hand off to your project-local one because it wasn't on disk.
     
     This can happen for example after you have cloned a fresh copy of your project from a remote repository.
 
     Please install your dependencies and try your command again.
 
-    Location of the ${toolName} CLI you invoked: ${execLayout.thisProcessToolBin.realPath}
-    Location of your project-local ${toolName} CLI: ${execLayout.project!.toolBinPath}
+    Location of the ${toolName} CLI you invoked: ${execLayout.process.toolPath}
+    Location of your project-local ${toolName} CLI: ${execLayout.project!.toolPath}
   `
 }

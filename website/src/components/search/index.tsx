@@ -2,10 +2,10 @@ import React, { useState } from 'react'
 import { InstantSearch, Index, Hits, connectStateResults } from 'react-instantsearch-dom'
 import algoliasearch from 'algoliasearch/lite'
 import config from '../../../config'
-import CustomSearchBox from './input'
 import DocHit from './hitComps'
 import styled from 'styled-components'
 import Overlay from './overlay'
+import CustomSearchBox from './input'
 
 const HitsWrapper = styled.div`
   display: none;
@@ -18,7 +18,7 @@ const HitsWrapper = styled.div`
   z-index: 100002;
   -webkit-overflow-scrolling: touch;
   position: absolute;
-  left: 245px;
+  left: 230px;
   top: 0;
   max-width: 880px;
   width: 100vw;
@@ -53,11 +53,28 @@ const searchClient = algoliasearch(
   config.header.search.algoliaSearchKey
 )
 
+const getHits = (children: any, res: any) => {
+  const allHits = res.hits
+  const newHits = allHits
+    .filter((h: any) => h._distinctSeqID == 0)
+    .map((x: any) => ({
+      ...x,
+      moreCount: 0,
+    }))
+  allHits.map((h: any) => {
+    const first = newHits.find((firstG: any) => firstG.slug == h.slug)
+    if (first) {
+      first.moreCount++
+    }
+  })
+  res.hits = newHits
+  return children
+}
 const Results = connectStateResults(
   ({ isSearchStalled, searchState: state, searchResults: res, children }: any) =>
     (isSearchStalled ? <div className="loader">Searching...</div> : null) ||
     (res && res.nbHits > 0 ? (
-      children
+      getHits(children, res)
     ) : (
       <div className="no-results">No results for '{state.query}'</div>
     ))
@@ -66,6 +83,7 @@ const Results = connectStateResults(
 export default function Search({ hitsStatus }: any) {
   const [query, setQuery] = useState(``)
   const [showHits, setShowHits] = React.useState(false)
+
   const hideSearch = () => setShowHits(false)
 
   const showSearch = () => setShowHits(true)
@@ -82,7 +100,7 @@ export default function Search({ hitsStatus }: any) {
     >
       <Overlay visible={query.length > 0 && showHits} hideSearch={hideSearch} />
       <CustomSearchBox onFocus={showSearch} />
-      <HitsWrapper className={`${query.length > 0 && showHits ? 'show' : ''}`}>
+      <HitsWrapper className={`${query.length > 0 && showHits ? 'show' : ''}`} onClick={hideSearch}>
         <Index key={indexName} indexName={indexName}>
           <Results>
             <Hits hitComponent={DocHit} />

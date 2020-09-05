@@ -1,27 +1,27 @@
-process.env.FORCE_COLOR = '0'
-let mockedStdoutBuffer: string = ''
-const mockStdout = jest.spyOn(process.stdout, 'write').mockImplementation((data) => {
-  mockedStdoutBuffer += data
-  return true
-})
-
-afterEach(() => {
-  mockedStdoutBuffer = ''
-})
-
-const mockExit = jest.spyOn(process, 'exit').mockImplementation(((n: any) => {
-  mockedStdoutBuffer += `\n\n--- process.exit(${n}) ---\n\n`
-}) as any)
-
 import { log } from '@nexus/logger'
-import stripAnsi from 'strip-ansi'
+import 'jest-extended'
+import { defaultsDeep } from 'lodash'
+import * as Path from 'path'
 import { TsConfigJson } from 'type-fest'
 import * as Layout from '.'
 import { FSSpec, writeFSSpec } from '../../lib/testing-utils'
-import { rightOrThrow } from '../glocal/utils'
 import * as TC from '../test-context'
-import { repalceInObject, replaceEvery } from '../utils'
+import { leftOrThrow, normalizePathsInData, repalceInObject, replaceEvery, rightOrThrow } from '../utils'
 import { NEXUS_TS_LSP_IMPORT_ID } from './tsconfig'
+
+let logs: string = ''
+
+log.settings({
+  output: {
+    write(data) {
+      logs += data
+    },
+  },
+})
+
+afterEach(() => {
+  logs = ''
+})
 
 /**
  * Disable logger timeDiff and color to allow snapshot matching
@@ -41,20 +41,25 @@ process.stdout.columns = 300
  * Helpers
  */
 
-function tsconfigContent(input: TsConfigJson): string {
-  return JSON.stringify(input)
+function tsconfig(input?: TsConfigJson): TsConfigJson {
+  const defaultTsConfigContent: TsConfigJson = {
+    compilerOptions: {
+      noEmit: true,
+      rootDir: '.',
+      plugins: [{ name: NEXUS_TS_LSP_IMPORT_ID }],
+      typeRoots: ['node_modules/@types', 'types'],
+      esModuleInterop: true,
+    },
+    include: ['types.d.ts', '.'],
+  }
+  return defaultsDeep(input, defaultTsConfigContent)
 }
 
-const defaultTsConfigContent = {
-  compilerOptions: {
-    rootDir: '.',
-    plugins: [{ name: NEXUS_TS_LSP_IMPORT_ID }],
-  },
-  include: ['.'],
-}
-
-const fsTsConfig = {
-  'tsconfig.json': tsconfigContent(defaultTsConfigContent),
+/**
+ * Create tsconfig content. Defaults to minimum valid tsconfig needed by Nexus. Passed config will override and merge using lodash deep defaults.
+ */
+function tsconfigSource(input?: TsConfigJson): string {
+  return JSON.stringify(tsconfig(input))
 }
 
 const ctx = TC.create(
@@ -70,42 +75,85 @@ const ctx = TC.create(
           ? replaceEvery(x, ctx.tmpDir, '__DYNAMIC__')
           : repalceInObject(ctx.tmpDir, '__DYNAMIC__', x)
       },
-      async scanThrow(opts?: { entrypointPath?: string; buildOutput?: string }) {
+      async createLayoutThrow(opts?: { entrypointPath?: string; buildOutput?: string }) {
         const data = rightOrThrow(
           await Layout.create({
-            cwd: ctx.tmpDir,
+            projectRoot: ctx.fs.cwd(),
             entrypointPath: opts?.entrypointPath,
             buildOutputDir: opts?.buildOutput,
             asBundle: false,
           })
         )
-        mockedStdoutBuffer = mockedStdoutBuffer.split(ctx.tmpDir).join('__DYNAMIC__')
-        return repalceInObject(ctx.tmpDir, '__DYNAMIC__', data.data)
+        logs = replaceEvery(logs, ctx.fs.cwd(), '__DYNAMIC__')
+        return normalizePathsInData(data.data, ctx.fs.cwd(), '__DYNAMIC__')
       },
-      async scan(opts?: { entrypointPath?: string; buildOutput?: string }) {
+      async createLayout2(opts?: { entrypointPath?: string; buildOutput?: string }) {
         return Layout.create({
-          cwd: ctx.tmpDir,
+          projectRoot: ctx.fs.cwd(),
           entrypointPath: opts?.entrypointPath,
           buildOutputDir: opts?.buildOutput,
           asBundle: false,
-        }).then((v) => repalceInObject(ctx.tmpDir, '__DYNAMIC__', v))
+        })
+      },
+      async createLayout(opts?: { entrypointPath?: string; buildOutput?: string }) {
+        return Layout.create({
+          projectRoot: ctx.fs.cwd(),
+          entrypointPath: opts?.entrypointPath,
+          buildOutputDir: opts?.buildOutput,
+          asBundle: false,
+        }).then((v) => {
+          return normalizePathsInData(v, ctx.fs.cwd(), '__DYNAMIC__')
+        })
       },
     }
   })
 )
 
+const nestTmpDir = () => {
+  const projectRootPath = ctx.fs.path('project-root')
+  ctx.fs.dir(projectRootPath)
+  ctx.fs = ctx.fs.cwd(projectRootPath)
+}
+
 /**
  * Tests
  */
 
-it('fails if empty file tree', async () => {
-  ctx.setup()
+describe('projectRoot', () => {
+  it('can be forced', () => {
+    const projectRoot = ctx.fs.path('./foobar')
+    ctx.fs.write('./foobar/app.ts', '')
+    ctx.fs.dir(projectRoot)
+    expect(Layout.create({ projectRoot }).then(rightOrThrow)).resolves.toMatchObject({ projectRoot })
+  })
+  it('otherwise uses first dir in hierarchy with a package.json', () => {
+    nestTmpDir()
+    ctx.fs.write('../package.json', { version: '0.0.0', name: 'foo' })
+    ctx.fs.write('app.ts', '')
+    expect(Layout.create({ cwd: ctx.fs.cwd() }).then(rightOrThrow)).resolves.toMatchObject({
+      projectRoot: ctx.fs.path('..'),
+    })
+  })
+  it('otherwise finally falls back to process cwd', () => {
+    ctx.fs.write('app.ts', '')
+    expect(Layout.create({ cwd: ctx.fs.cwd() }).then(rightOrThrow)).resolves.toMatchObject({
+      projectRoot: ctx.fs.cwd(),
+    })
+  })
+})
 
-  try {
-    await ctx.scanThrow()
-  } catch (err) {
-    expect(err.message).toContain("Path you want to find stuff in doesn't exist")
-  }
+describe('sourceRoot', () => {
+  it('defaults to project dir', async () => {
+    ctx.setup({ 'tsconfig.json': '', 'app.ts': '' })
+    const res = await ctx.createLayout().then(rightOrThrow)
+    expect(res.sourceRoot).toEqual('__DYNAMIC__')
+    expect(res.projectRoot).toEqual('__DYNAMIC__')
+  })
+  it('uses the value in tsconfig compilerOptions.rootDir if present', async () => {
+    ctx.setup({ 'tsconfig.json': tsconfigSource({ compilerOptions: { rootDir: 'api' } }), 'api/app.ts': '' })
+    const res = await ctx.createLayout().then(rightOrThrow)
+    expect(res.sourceRoot).toEqual(Path.posix.join('__DYNAMIC__/api'))
+  })
 })
 
 describe('tsconfig', () => {
@@ -113,9 +161,43 @@ describe('tsconfig', () => {
     ctx.setup({ 'app.ts': '' })
   })
 
+  it('warns if "types.d.ts" is missing from include', async () => {
+    ctx.setup({
+      'tsconfig.json': tsconfigSource({ include: ['.'] }),
+    })
+    await ctx.createLayoutThrow()
+    expect(logs).toMatchInlineSnapshot(`
+      "▲ nexus:tsconfig Please add [93m\\"types.d.ts\\"[39m to your [93m\\"include\\"[39m array. If you do not then results from Nexus and your IDE will not agree if the declaration file is used in your project.
+      "
+    `)
+  })
+
+  it('fails if tsconfig settings does not lead to matching any source files', async () => {
+    ctx.fs.remove('app.ts')
+    const res = await ctx.createLayout().then(leftOrThrow)
+    expect(res).toMatchInlineSnapshot(`
+      Object {
+        "context": Object {
+          "diagnostics": Array [
+            Object {
+              "category": 1,
+              "code": 18003,
+              "file": undefined,
+              "length": undefined,
+              "messageText": "No inputs were found in config file '__DYNAMIC__/tsconfig.json'. Specified 'include' paths were '[\\"types.d.ts\\",\\".\\"]' and 'exclude' paths were '[]'.",
+              "reportsUnnecessary": undefined,
+              "start": undefined,
+            },
+          ],
+        },
+        "type": "invalid_tsconfig",
+      }
+    `)
+  })
+
   it('will scaffold tsconfig if not present', async () => {
-    await ctx.scanThrow()
-    expect(mockedStdoutBuffer).toMatchInlineSnapshot(`
+    await ctx.createLayoutThrow()
+    expect(normalizePathsInData(logs)).toMatchInlineSnapshot(`
       "▲ nexus:tsconfig We could not find a \\"tsconfig.json\\" file
       ▲ nexus:tsconfig We scaffolded one for you at __DYNAMIC__/tsconfig.json
       "
@@ -123,10 +205,12 @@ describe('tsconfig', () => {
     expect(ctx.fs.read('tsconfig.json', 'json')).toMatchInlineSnapshot(`
       Object {
         "compilerOptions": Object {
+          "esModuleInterop": true,
           "lib": Array [
             "esnext",
           ],
           "module": "commonjs",
+          "noEmit": true,
           "plugins": Array [
             Object {
               "name": "nexus/typescript-language-service",
@@ -135,326 +219,424 @@ describe('tsconfig', () => {
           "rootDir": ".",
           "strict": true,
           "target": "es2016",
+          "typeRoots": Array [
+            "node_modules/@types",
+            "types",
+          ],
         },
         "include": Array [
+          "types.d.ts",
           ".",
         ],
       }
     `)
   })
 
-  it('will warn if reserved settings are in use', async () => {
-    ctx.setup({
-      'tsconfig.json': tsconfigContent({
-        compilerOptions: {
-          rootDir: '.',
-          incremental: true,
-          tsBuildInfoFile: 'foo',
-          plugins: defaultTsConfigContent.compilerOptions.plugins,
-        },
-        include: ['.'],
-      }),
+  describe('composite projects', () => {
+    it('inheritable settings are recognized but "include", "rootDir", "plugins", "typeRoots" must be local', async () => {
+      nestTmpDir()
+      ctx.fs.write('src/app.ts', '')
+      ctx.fs.write('../tsconfig.packages.json', tsconfigSource())
+      ctx.fs.write('tsconfig.json', {
+        extends: '../tsconfig.packages.json',
+      } as TsConfigJson)
+      await ctx.createLayoutThrow()
+      expect(logs).toMatchInlineSnapshot(`
+        "▲ nexus:tsconfig You have not setup the Nexus TypeScript Language Service Plugin. Add this to your compiler options:
+
+            \\"plugins\\": [{ \\"name\\": \\"nexus/typescript-language-service\\" }]
+
+        ▲ nexus:tsconfig Please set [93m\`compilerOptions.typeRoots\`[39m to [93m[\\"node_modules/@types\\",\\"types\\"][39m. \\"node_modules/@types\\" is the TypeScript default for types packages and where Nexus outputs typegen to. \\"types\\" is the Nexus convention for _local_ types packages.
+        ▲ nexus:tsconfig Please add [93m\\"types.d.ts\\"[39m to your [93m\\"include\\"[39m array. If you do not then results from Nexus and your IDE will not agree if the declaration file is used in your project.
+        ▲ nexus:tsconfig Please set [93m\`compilerOptions.rootDir\`[39m to [93m\\".\\"[39m
+        ▲ nexus:tsconfig Please set [93m\`include\`[39m to have \\".\\"
+        "
+      `)
     })
-    await ctx.scanThrow()
-    expect(mockedStdoutBuffer).toMatchInlineSnapshot(`
-      "▲ nexus:tsconfig You have set compilerOptions.tsBuildInfoFile in your tsconfig.json but it will be ignored by Nexus. Nexus manages this value internally.
-      ▲ nexus:tsconfig You have set compilerOptions.incremental in your tsconfig.json but it will be ignored by Nexus. Nexus manages this value internally.
-      "
-    `)
   })
 
-  it('will warn if required settings are not set and set them in memory', async () => {
-    ctx.setup({
-      'tsconfig.json': '',
+  describe('no emit', () => {
+    it('warns if "noEmit" is not true (explicit false), and sets "noEmit" to false in memory', async () => {
+      ctx.setup({
+        'tsconfig.json': tsconfigSource({ compilerOptions: { noEmit: false } }),
+      })
+      const res = await ctx.createLayoutThrow()
+      expect(logs).toMatchInlineSnapshot(`
+        "▲ nexus:tsconfig Please set [93m\`compilerOptions.noEmit\`[39m to true. This will ensure you do not accidentally emit using [93m\`$ tsc\`[39m. Use [93m\`$ nexus build\`[39m to build your app and emit JavaScript.
+        "
+      `)
+      expect(res.tsConfig.content.options.noEmit).toEqual(false)
     })
-    const layout = await ctx.scanThrow()
-    expect(mockedStdoutBuffer).toMatchInlineSnapshot(`
-      "▲ nexus:tsconfig You have not setup the Nexus TypeScript Language Service Plugin. Add this to your tsconfig compiler options:
+    it('warns if "noEmit" is not true (undefined), and sets "noEmit" to false in memory', async () => {
+      const tscfg = tsconfig()
+      delete tscfg.compilerOptions?.noEmit
 
-          \\"plugins\\": [{ \\"name\\": \\"nexus/typescript-language-service\\" }]
+      ctx.setup({
+        'tsconfig.json': JSON.stringify(tscfg),
+      })
+      const res = await ctx.createLayoutThrow()
+      expect(logs).toMatchInlineSnapshot(`
+        "▲ nexus:tsconfig Please set [93m\`compilerOptions.noEmit\`[39m to true. This will ensure you do not accidentally emit using [93m\`$ tsc\`[39m. Use [93m\`$ nexus build\`[39m to build your app and emit JavaScript.
+        "
+      `)
+      expect(res.tsConfig.content.options.noEmit).toEqual(false)
+    })
+  })
+  describe('linting', () => {
+    it('warns if reserved settings are in use', async () => {
+      ctx.setup({
+        'tsconfig.json': tsconfigSource({
+          compilerOptions: {
+            incremental: true,
+            tsBuildInfoFile: 'foo',
+          },
+        }),
+      })
+      await ctx.createLayoutThrow()
+      expect(logs).toMatchInlineSnapshot(`
+        "▲ nexus:tsconfig You have set [93m\`compilerOptions.tsBuildInfoFile\`[39m but it will be ignored by Nexus. Nexus manages this value internally.
+        ▲ nexus:tsconfig You have set [93m\`compilerOptions.incremental\`[39m but it will be ignored by Nexus. Nexus manages this value internally.
+        "
+      `)
+    })
+    it('warns if rootDir or include not set and sets them in memory', async () => {
+      const tscfg = tsconfig()
+      delete tscfg.compilerOptions?.rootDir
+      delete tscfg.include
 
-      ▲ nexus:tsconfig Please set your tsconfig.json compilerOptions.rootDir to \\".\\"
-      ▲ nexus:tsconfig Please set your tsconfig.json include to have \\".\\"
-      "
-    `)
-    expect(layout.tsConfig.content.raw.compilerOptions.rootDir).toEqual('.')
-    expect(layout.tsConfig.content.raw.include).toEqual(['.'])
+      ctx.setup({
+        'tsconfig.json': JSON.stringify(tscfg),
+      })
+      const layout = await ctx.createLayoutThrow()
+      expect(logs).toMatchInlineSnapshot(`
+        "▲ nexus:tsconfig Please add [93m\\"types.d.ts\\"[39m to your [93m\\"include\\"[39m array. If you do not then results from Nexus and your IDE will not agree if the declaration file is used in your project.
+        ▲ nexus:tsconfig Please set [93m\`compilerOptions.rootDir\`[39m to [93m\\".\\"[39m
+        ▲ nexus:tsconfig Please set [93m\`include\`[39m to have \\".\\"
+        "
+      `)
+      expect(layout.tsConfig.content.raw.compilerOptions.rootDir).toEqual('.')
+      expect(layout.tsConfig.content.raw.include).toEqual(['types.d.ts', '.'])
+    })
+    it('need the Nexus TS LSP setup', async () => {
+      ctx.setup({
+        'tsconfig.json': tsconfigSource({
+          compilerOptions: { plugins: [{ name: 'foobar' }] },
+        }),
+      })
+
+      await ctx.createLayoutThrow()
+      expect(logs).toMatchInlineSnapshot(`
+        "▲ nexus:tsconfig You have not added the Nexus TypeScript Language Service Plugin to your configured TypeScript plugins. Add this to your compilerOptions:
+
+            [93m\\"plugins\\": [{\\"name\\":\\"foobar\\"},{\\"name\\":\\"nexus/typescript-language-service\\"}][39m
+
+        "
+      `)
+    })
+    it('does not support use of compilerOptions.types', async () => {
+      ctx.setup({
+        'tsconfig.json': tsconfigSource({ compilerOptions: { types: [] } }),
+      })
+      await ctx.createLayoutThrow()
+      expect(logs).toMatchInlineSnapshot(`
+        "■ nexus:tsconfig You have set [93m\`compilerOptions.types\`[39m but Nexus does not support it. If you do not remove your customization you may/will (e.g. VSCode) see inconsistent results between your IDE and what Nexus tells you at build time. If you would like to see Nexus support this setting please chime in at https://github.com/graphql-nexus/nexus/issues/1036.
+        "
+      `)
+    })
+
+    describe('typeRoots', () => {
+      it('logs error if typeRoots present but missing "node_modules/@types", and adds it in-memory', async () => {
+        const tscfg = tsconfig()
+        tscfg.compilerOptions!.typeRoots = ['types']
+        ctx.setup({
+          'tsconfig.json': JSON.stringify(tscfg),
+        })
+        const res = await ctx.createLayout2().then(rightOrThrow)
+        expect(logs).toMatchInlineSnapshot(`
+          "■ nexus:tsconfig Please add [93m\\"node_modules/@types\\"[39m to your [93m\`compilerOptions.typeRoots\`[39m array. 
+          "
+        `)
+        // todo normalize in layout module???
+        expect(res.tsConfig.content.options.typeRoots?.map(Path.normalize)).toIncludeSameMembers(
+          ['types', 'node_modules/@types'].map((relPath) => ctx.fs.path(relPath))
+        )
+      })
+      it('logs warning if "typeRoots" present but missing "types", and adds it in-memory', async () => {
+        const tscfg = tsconfig()
+        tscfg.compilerOptions!.typeRoots = ['node_modules/@types']
+        ctx.setup({
+          'tsconfig.json': JSON.stringify(tscfg),
+        })
+        const res = await ctx.createLayout2().then(rightOrThrow)
+        expect(logs).toMatchInlineSnapshot(`
+          "▲ nexus:tsconfig Please add [93m\\"types\\"[39m to your [93m\`compilerOptions.typeRoots\`[39m array. 
+          "
+        `)
+        expect(res.tsConfig.content.options.typeRoots?.map(Path.normalize)).toIncludeSameMembers(
+          ['types', 'node_modules/@types'].map((relPath) => ctx.fs.path(relPath))
+        )
+      })
+      it('logs warning if "typeRoots" missing, and add its in-memory', async () => {
+        const tscfg = tsconfig()
+        delete tscfg.compilerOptions!.typeRoots
+        ctx.setup({
+          'tsconfig.json': JSON.stringify(tscfg),
+        })
+        const res = await ctx.createLayout2().then(rightOrThrow)
+        expect(logs).toMatchInlineSnapshot(`
+          "▲ nexus:tsconfig Please set [93m\`compilerOptions.typeRoots\`[39m to [93m[\\"node_modules/@types\\",\\"types\\"][39m. \\"node_modules/@types\\" is the TypeScript default for types packages and where Nexus outputs typegen to. \\"types\\" is the Nexus convention for _local_ types packages.
+          "
+        `)
+        expect(res.tsConfig.content.options.typeRoots?.map(Path.normalize)).toIncludeSameMembers(
+          ['node_modules/@types', 'types'].map((relPath) => ctx.fs.path(relPath))
+        )
+      })
+      it('preserves any "typeRoot" settings present', async () => {
+        const tscfg = tsconfig()
+        tscfg.compilerOptions!.typeRoots = ['node_modules/@types', 'custom']
+        ctx.setup({
+          'tsconfig.json': JSON.stringify(tscfg),
+        })
+        const res = await ctx.createLayout2().then(rightOrThrow)
+        expect(logs).toMatchInlineSnapshot(`
+          "▲ nexus:tsconfig Please add [93m\\"types\\"[39m to your [93m\`compilerOptions.typeRoots\`[39m array. 
+          "
+        `)
+        expect(res.tsConfig.content.options.typeRoots?.map(Path.normalize)).toIncludeSameMembers(
+          ['node_modules/@types', 'custom', 'types'].map((relPath) => ctx.fs.path(relPath))
+        )
+      })
+    })
   })
 
-  it("will contextually warn if have TS LSP's present but not nexus one", async () => {
-    ctx.setup({
-      'tsconfig.json': tsconfigContent({
-        ...defaultTsConfigContent,
-        compilerOptions: { ...defaultTsConfigContent.compilerOptions, plugins: [{ name: 'foobar' }] },
-      }),
-    })
-
-    await ctx.scanThrow()
-    expect(mockedStdoutBuffer).toMatchInlineSnapshot(`
-      "▲ nexus:tsconfig You have not added the Nexus TypeScript Language Service Plugin to your configured TypeScript plugins. Add this to your tsconfig compiler options:
-
-          \\"plugins\\": [{\\"name\\":\\"foobar\\"},{\\"name\\":\\"nexus/typescript-language-service\\"}]
-
-      "
-    `)
-  })
-
-  it('will fatal message and exit if error reading file', async () => {
+  it('will return exception if error reading file', async () => {
     ctx.setup({
       'tsconfig.json': 'bad json',
     })
-    await ctx.scanThrow()
-    expect(stripAnsi(mockedStdoutBuffer)).toMatchInlineSnapshot(`
-      "✕ nexus:tsconfig Unable to read your tsconifg.json
-
-      ../../../../..__DYNAMIC__/tsconfig.json:1:1 - error TS1005: '{' expected.
-
-      1 bad json
-        ~~~
-
-
-
-      --- process.exit(1) ---
-
-      ▲ nexus:tsconfig You have not setup the Nexus TypeScript Language Service Plugin. Add this to your tsconfig compiler options:
-
-          \\"plugins\\": [{ \\"name\\": \\"nexus/typescript-language-service\\" }]
-
-      ▲ nexus:tsconfig Please set your tsconfig.json compilerOptions.rootDir to \\".\\"
-      ▲ nexus:tsconfig Please set your tsconfig.json include to have \\".\\"
-      "
-    `)
+    const res = await ctx.createLayout2().then(leftOrThrow)
+    expect(res).toMatchObject({
+      context: {},
+      type: 'generic',
+      message: expect.stringMatching(".*error.*TS1005.*'{' expected"),
+    })
   })
 
-  it('will fatal message and exit if invalid tsconfig schema', async () => {
+  it('will return exception if invalid tsconfig schema', async () => {
     ctx.setup({
       'tsconfig.json': '{ "exclude": "bad" }',
     })
-    await ctx.scanThrow()
-    expect(stripAnsi(mockedStdoutBuffer)).toMatchInlineSnapshot(`
-      "▲ nexus:tsconfig You have not setup the Nexus TypeScript Language Service Plugin. Add this to your tsconfig compiler options:
-
-          \\"plugins\\": [{ \\"name\\": \\"nexus/typescript-language-service\\" }]
-
-      ▲ nexus:tsconfig Please set your tsconfig.json compilerOptions.rootDir to \\".\\"
-      ▲ nexus:tsconfig Please set your tsconfig.json include to have \\".\\"
-      ✕ nexus:tsconfig Your tsconfig.json is invalid
-
-      error TS5024: Compiler option 'exclude' requires a value of type Array.
-
-
-
-      --- process.exit(1) ---
-
-      "
+    const res = await ctx.createLayout().then(leftOrThrow)
+    expect(res).toMatchInlineSnapshot(`
+      Object {
+        "context": Object {
+          "diagnostics": Array [
+            Object {
+              "category": 1,
+              "code": 5024,
+              "file": undefined,
+              "length": undefined,
+              "messageText": "Compiler option 'exclude' requires a value of type Array.",
+              "reportsUnnecessary": undefined,
+              "start": undefined,
+            },
+          ],
+        },
+        "type": "invalid_tsconfig",
+      }
     `)
   })
 })
 
-it('fails if no entrypoint and no graphql modules', async () => {
+it('fails if no entrypoint and no nexus modules', async () => {
   ctx.setup({
-    ...fsTsConfig,
+    'tsconfig.json': tsconfigSource(),
     src: {
       'User.ts': '',
       'Post.ts': '',
     },
   })
 
-  await ctx.scanThrow()
+  const res = await ctx.createLayout()
 
-  expect(mockedStdoutBuffer).toMatchInlineSnapshot(`
-    "■ nexus:layout We could not find any modules that imports 'nexus' or app.ts entrypoint
-    ■ nexus:layout Please do one of the following:
-
-      1. Create a file, import { schema } from 'nexus' and write your GraphQL type definitions in it.
-      2. Create an app.ts file.
-
-
-    --- process.exit(1) ---
-
-    "
+  expect(res).toMatchInlineSnapshot(`
+    Object {
+      "_tag": "Left",
+      "left": Object {
+        "context": Object {},
+        "type": "no_app_or_schema_modules",
+      },
+    }
   `)
-  expect(mockExit).toHaveBeenCalledWith(1)
 })
 
-it('finds nested nexus modules', async () => {
-  ctx.setup({
-    ...fsTsConfig,
-    src: {
-      'app.ts': '',
-      graphql: {
-        '1.ts': `import { schema } from 'nexus'`,
-        '2.ts': `import { schema } from 'nexus'`,
+describe('nexusModules', () => {
+  it('finds nested nexus modules', async () => {
+    ctx.setup({
+      'tsconfig.json': tsconfigSource(),
+      src: {
+        'app.ts': '',
         graphql: {
-          '3.ts': `import { schema } from 'nexus'`,
-          '4.ts': `import { schema } from 'nexus'`,
+          '1.ts': `import { schema } from 'nexus'`,
+          '2.ts': `import { schema } from 'nexus'`,
           graphql: {
-            '5.ts': `import { schema } from 'nexus'`,
-            '6.ts': `import { schema } from 'nexus'`,
+            '3.ts': `import { schema } from 'nexus'`,
+            '4.ts': `import { schema } from 'nexus'`,
+            graphql: {
+              '5.ts': `import { schema } from 'nexus'`,
+              '6.ts': `import { schema } from 'nexus'`,
+            },
           },
         },
       },
-    },
+    })
+
+    const result = await ctx.createLayout2().then(rightOrThrow)
+
+    expect(result.nexusModules).toIncludeSameMembers(
+      [
+        'src/graphql/1.ts',
+        'src/graphql/2.ts',
+        'src/graphql/graphql/3.ts',
+        'src/graphql/graphql/4.ts',
+        'src/graphql/graphql/graphql/5.ts',
+        'src/graphql/graphql/graphql/6.ts',
+      ].map((relPath) => ctx.fs.path(relPath))
+    )
   })
 
-  const result = await ctx.scanThrow()
-
-  expect(result.nexusModules).toMatchInlineSnapshot(`
-    Array [
-      "__DYNAMIC__/src/graphql/1.ts",
-      "__DYNAMIC__/src/graphql/2.ts",
-      "__DYNAMIC__/src/graphql/graphql/3.ts",
-      "__DYNAMIC__/src/graphql/graphql/4.ts",
-      "__DYNAMIC__/src/graphql/graphql/graphql/5.ts",
-      "__DYNAMIC__/src/graphql/graphql/graphql/6.ts",
-    ]
-  `)
-})
-
-it('detects yarn as package manager', async () => {
-  ctx.setup({ ...fsTsConfig, 'app.ts': '', 'yarn.lock': '' })
-  const result = await ctx.scanThrow()
-  expect(result.packageManagerType).toMatchInlineSnapshot(`"yarn"`)
-})
-
-it('finds app.ts entrypoint', async () => {
-  ctx.setup({ ...fsTsConfig, 'app.ts': '' })
-  const result = await ctx.scanThrow()
-  expect(result.app).toMatchInlineSnapshot(`
-    Object {
-      "exists": true,
-      "path": "__DYNAMIC__/app.ts",
-    }
-  `)
-})
-
-it('set app.exists = false if no entrypoint', async () => {
-  await ctx.setup({ ...fsTsConfig, 'graphql.ts': '' })
-  const result = await ctx.scanThrow()
-  expect(result.app).toMatchInlineSnapshot(`
-    Object {
-      "exists": false,
-      "path": null,
-    }
-  `)
-})
-
-it('uses custom relative entrypoint when defined', async () => {
-  await ctx.setup({ ...fsTsConfig, 'index.ts': `console.log('entrypoint')` })
-  const result = await ctx.scanThrow({ entrypointPath: './index.ts' })
-  expect(result.app).toMatchInlineSnapshot(`
-    Object {
-      "exists": true,
-      "path": "__DYNAMIC__/index.ts",
-    }
-  `)
-})
-
-it('uses custom absolute entrypoint when defined', async () => {
-  await ctx.setup({ ...fsTsConfig, 'index.ts': `console.log('entrypoint')` })
-  const result = await ctx.scanThrow({ entrypointPath: ctx.fs.path('index.ts') })
-  expect(result.app).toMatchInlineSnapshot(`
-    Object {
-      "exists": true,
-      "path": "__DYNAMIC__/index.ts",
-    }
-  `)
-})
-
-it('fails if custom entrypoint does not exist', async () => {
-  await ctx.setup({ ...fsTsConfig, 'index.ts': `console.log('entrypoint')` })
-  const result = await ctx.scan({ entrypointPath: './wrong-path.ts' })
-  expect(JSON.stringify(result)).toMatchInlineSnapshot(
-    `"{\\"_tag\\":\\"Left\\",\\"left\\":{\\"message\\":\\"Entrypoint does not exist\\",\\"context\\":{\\"path\\":\\"__DYNAMIC__/wrong-path.ts\\"}}}"`
-  )
-})
-
-it('fails if custom entrypoint is not a .ts file', async () => {
-  await ctx.setup({ ...fsTsConfig, 'index.ts': ``, 'index.js': `console.log('entrypoint')` })
-  const result = await ctx.scan({ entrypointPath: './index.js' })
-  expect(JSON.stringify(result)).toMatchInlineSnapshot(
-    `"{\\"_tag\\":\\"Left\\",\\"left\\":{\\"message\\":\\"Entrypoint must be a .ts file\\",\\"context\\":{\\"path\\":\\"__DYNAMIC__/index.js\\"}}}"`
-  )
-})
-
-it('does not take custom entrypoint as nexus module if contains a nexus import', async () => {
-  await ctx.setup({
-    ...fsTsConfig,
-    'app.ts': `import { schema } from 'nexus'`,
-    'graphql.ts': `import { schema } from 'nexus'`,
-  })
-  const result = await ctx.scanThrow({ entrypointPath: './app.ts' })
-  expect({
-    app: result.app,
-    nexusModules: result.nexusModules,
-  }).toMatchInlineSnapshot(`
-    Object {
-      "app": Object {
-        "exists": true,
-        "path": "__DYNAMIC__/app.ts",
+  it('does not take custom entrypoint as nexus module if contains a nexus import', async () => {
+    await ctx.setup({
+      'tsconfig.json': tsconfigSource(),
+      'app.ts': `import { schema } from 'nexus'`,
+      'graphql.ts': `import { schema } from 'nexus'`,
+    })
+    const result = await ctx.createLayout2({ entrypointPath: './app.ts' }).then(rightOrThrow)
+    // result.nexusModules
+    expect(result).toMatchObject({
+      app: {
+        exists: true,
+        path: expect.stringContaining(ctx.fs.path('app.ts')),
       },
-      "nexusModules": Array [
-        "__DYNAMIC__/graphql.ts",
-      ],
-    }
-  `)
+      nexusModules: [ctx.fs.path('graphql.ts')],
+    })
+  })
 })
 
-describe('build output', () => {
-  it(`defaults to .nexus/build`, async () => {
-    await ctx.setup({ ...fsTsConfig, 'graphql.ts': '' })
-    const result = await ctx.scanThrow()
+describe('packageManagerType', () => {
+  it('detects yarn as package manager', async () => {
+    ctx.setup({ 'tsconfig.json': tsconfigSource(), 'app.ts': '', 'yarn.lock': '' })
+    const result = await ctx.createLayoutThrow()
+    expect(result.packageManagerType).toMatchInlineSnapshot(`"yarn"`)
+  })
+})
 
-    expect({
-      tsOutputDir: result.build.tsOutputDir,
-      startModuleInPath: result.build.startModuleInPath,
-      startModuleOutPath: result.build.startModuleOutPath,
-    }).toMatchInlineSnapshot(`
-      Object {
-        "startModuleInPath": "__DYNAMIC__/index.ts",
-        "startModuleOutPath": "__DYNAMIC__/.nexus/build/index.js",
-        "tsOutputDir": "__DYNAMIC__/.nexus/build",
-      }
-    `)
+describe('entrypoint', () => {
+  it('finds app.ts entrypoint', async () => {
+    ctx.setup({ 'tsconfig.json': tsconfigSource(), 'app.ts': '' })
+    const result = await ctx.createLayoutThrow()
+    expect(result.app).toMatchInlineSnapshot(`
+          Object {
+            "exists": true,
+            "path": "__DYNAMIC__/app.ts",
+          }
+      `)
+  })
+
+  it('set app.exists = false if no entrypoint', async () => {
+    await ctx.setup({ 'tsconfig.json': tsconfigSource(), 'foo.ts': 'import "nexus"' })
+    const result = await ctx.createLayoutThrow()
+    expect(result.app).toMatchInlineSnapshot(`
+          Object {
+            "exists": false,
+            "path": null,
+          }
+      `)
+  })
+
+  it('uses custom relative entrypoint when defined', async () => {
+    await ctx.setup({ 'tsconfig.json': tsconfigSource(), 'index.ts': `console.log('entrypoint')` })
+    const result = await ctx.createLayoutThrow({ entrypointPath: './index.ts' })
+    expect(result.app).toMatchInlineSnapshot(`
+          Object {
+            "exists": true,
+            "path": "__DYNAMIC__/index.ts",
+          }
+      `)
+  })
+
+  it('uses custom absolute entrypoint when defined', async () => {
+    await ctx.setup({ 'tsconfig.json': tsconfigSource(), 'index.ts': `console.log('entrypoint')` })
+    const result = await ctx.createLayoutThrow({ entrypointPath: ctx.fs.path('index.ts') })
+    expect(result.app).toMatchInlineSnapshot(`
+          Object {
+            "exists": true,
+            "path": "__DYNAMIC__/index.ts",
+          }
+      `)
+  })
+
+  it('fails if custom entrypoint does not exist', async () => {
+    await ctx.setup({ 'tsconfig.json': tsconfigSource(), 'index.ts': `console.log('entrypoint')` })
+    const result = await ctx.createLayout({ entrypointPath: './wrong-path.ts' })
+    expect(JSON.stringify(result)).toMatchInlineSnapshot(
+      `"{\\"_tag\\":\\"Left\\",\\"left\\":{\\"message\\":\\"Entrypoint does not exist\\",\\"context\\":{\\"path\\":\\"__DYNAMIC__/wrong-path.ts\\"},\\"type\\":\\"generic\\"}}"`
+    )
+  })
+
+  it('fails if custom entrypoint is not a .ts file', async () => {
+    await ctx.setup({
+      'tsconfig.json': tsconfigSource(),
+      'index.ts': ``,
+      'index.js': `console.log('entrypoint')`,
+    })
+    const result = await ctx.createLayout({ entrypointPath: './index.js' })
+    expect(JSON.stringify(result)).toMatchInlineSnapshot(
+      `"{\\"_tag\\":\\"Left\\",\\"left\\":{\\"message\\":\\"Entrypoint must be a .ts file\\",\\"context\\":{\\"path\\":\\"__DYNAMIC__/index.js\\"},\\"type\\":\\"generic\\"}}"`
+    )
+  })
+})
+
+describe('build', () => {
+  it(`defaults to .nexus/build`, async () => {
+    await ctx.setup({ 'tsconfig.json': tsconfigSource(), 'foo.ts': 'import "nexus"' })
+    const result = await ctx.createLayoutThrow()
+    expect(result).toMatchObject({
+      build: {
+        startModuleInPath: '__DYNAMIC__/index.ts',
+        startModuleOutPath: '__DYNAMIC__/.nexus/build/index.js',
+        tsOutputDir: '__DYNAMIC__/.nexus/build',
+      },
+    })
   })
 
   it(`use tsconfig.json outDir is no custom output is used`, async () => {
     await ctx.setup({
-      'tsconfig.json': tsconfigContent({
-        ...defaultTsConfigContent,
+      'tsconfig.json': tsconfigSource({
         compilerOptions: {
-          ...defaultTsConfigContent.compilerOptions,
           outDir: 'dist',
         },
       }),
-      'graphql.ts': '',
+      'foo.ts': 'import "nexus"',
     })
-    const result = await ctx.scanThrow()
-
-    expect({
-      tsOutputDir: result.build.tsOutputDir,
-      startModuleInPath: result.build.startModuleInPath,
-      startModuleOutPath: result.build.startModuleOutPath,
-    }).toMatchInlineSnapshot(`
-      Object {
-        "startModuleInPath": "__DYNAMIC__/index.ts",
-        "startModuleOutPath": "__DYNAMIC__/dist/index.js",
-        "tsOutputDir": "__DYNAMIC__/dist",
-      }
-    `)
+    const result = await ctx.createLayout2().then(rightOrThrow)
+    expect(result).toMatchObject({
+      build: {
+        startModuleInPath: ctx.fs.path('index.ts'),
+        startModuleOutPath: ctx.fs.path('dist/index.js'),
+        tsOutputDir: ctx.fs.path('dist'),
+      },
+    })
   })
   it(`override tsconfig.json outDir is a custom output is used`, async () => {
     await ctx.setup({
-      'tsconfig.json': tsconfigContent({
-        ...defaultTsConfigContent,
+      'tsconfig.json': tsconfigSource({
         compilerOptions: {
-          ...defaultTsConfigContent.compilerOptions,
           outDir: 'dist',
         },
       }),
-      'graphql.ts': '',
+      'foo.ts': 'import "nexus"',
     })
-    const result = await ctx.scanThrow({ buildOutput: 'custom-output' })
+    const result = await ctx.createLayoutThrow({ buildOutput: 'custom-output' })
 
     expect({
       tsOutputDir: result.build.tsOutputDir,
@@ -470,16 +652,57 @@ describe('build output', () => {
   })
 })
 
-describe('source root', () => {
-  it('defaults to project dir', async () => {
-    ctx.setup({ 'tsconfig.json': '' })
-    const result = await ctx.scanThrow()
-    expect(result.sourceRoot).toEqual('__DYNAMIC__')
-    expect(result.projectRoot).toEqual('__DYNAMIC__')
+describe('scanProjectType', () => {
+  const pjdata = { version: '0.0.0', name: 'foo' }
+
+  describe('if package.json with nexus dep then nexus project', () => {
+    it('in cwd', async () => {
+      ctx.fs.write('package.json', { ...pjdata, dependencies: { nexus: '0.0.0' } })
+      const res = await Layout.scanProjectType({ cwd: ctx.fs.cwd() })
+      expect(res.type).toMatchInlineSnapshot(`"NEXUS_project"`)
+    })
+    it('in hierarchy', async () => {
+      nestTmpDir()
+      ctx.fs.write('../package.json', { ...pjdata, dependencies: { nexus: '0.0.0' } })
+      const res = await Layout.scanProjectType({ cwd: ctx.fs.cwd() })
+      expect(res.type).toMatchInlineSnapshot(`"NEXUS_project"`)
+    })
   })
-  it('honours the value in tsconfig rootDir', async () => {
-    ctx.setup({ 'tsconfig.json': tsconfigContent({ compilerOptions: { rootDir: 'api' } }) })
-    const result = await ctx.scanThrow()
-    expect(result.sourceRoot).toMatchInlineSnapshot(`"__DYNAMIC__/api"`)
+
+  describe('if package.json without nexus dep then node project', () => {
+    it('in cwd', async () => {
+      ctx.fs.write('package.json', { ...pjdata, dependencies: {} })
+      const res = await Layout.scanProjectType({ cwd: ctx.fs.cwd() })
+      expect(res.type).toMatchInlineSnapshot(`"node_project"`)
+    })
+    it('in hierarchy', async () => {
+      nestTmpDir()
+      ctx.fs.write('../package.json', { ...pjdata, dependencies: {} })
+      const res = await Layout.scanProjectType({ cwd: ctx.fs.cwd() })
+      expect(res.type).toMatchInlineSnapshot(`"node_project"`)
+    })
+  })
+
+  it('if no package.json and dir is empty then new project', async () => {
+    const res = await Layout.scanProjectType({ cwd: ctx.fs.cwd() })
+    expect(res.type).toMatchInlineSnapshot(`"new"`)
+  })
+  it('if no package.json and dir is not empty then unknown project', async () => {
+    ctx.fs.write('foo.txt', 'bar')
+    const res = await Layout.scanProjectType({ cwd: ctx.fs.cwd() })
+    expect(res.type).toMatchInlineSnapshot(`"unknown"`)
+  })
+  describe('if malformed package.json then error', () => {
+    it('in cwd', async () => {
+      ctx.fs.write('package.json', 'bad')
+      const res = await Layout.scanProjectType({ cwd: ctx.fs.cwd() })
+      expect(res.type).toMatchInlineSnapshot(`"malformed_package_json"`)
+    })
+    it('in hierarchy', async () => {
+      nestTmpDir()
+      ctx.fs.write('../package.json', 'bad')
+      const res = await Layout.scanProjectType({ cwd: ctx.fs.cwd() })
+      expect(res.type).toMatchInlineSnapshot(`"malformed_package_json"`)
+    })
   })
 })

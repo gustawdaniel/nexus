@@ -1,61 +1,89 @@
 import createExpress, { Express } from 'express'
-import { GraphQLSchema } from 'graphql'
+import { GraphQLError, GraphQLSchema } from 'graphql'
 import * as HTTP from 'http'
 import { HttpError } from 'http-errors'
 import * as Net from 'net'
-import stripAnsi from 'strip-ansi'
 import * as Plugin from '../../lib/plugin'
-import { MaybePromise, noop } from '../../lib/utils'
+import { httpClose, httpListen, noop } from '../../lib/utils'
 import { AppState } from '../app'
 import * as DevMode from '../dev-mode'
-import { ContextContributor } from '../schema/schema'
+import { ContextAdder } from '../schema'
 import { assembledGuard } from '../utils'
+import { ApolloServerExpress } from './apollo-server'
+import { errorFormatter } from './error-formatter'
 import { createRequestHandlerGraphQL } from './handler-graphql'
-import { createRequestHandlerPlayground } from './handler-playground'
 import { log } from './logger'
 import { createServerSettingsManager } from './settings'
 
-const resolverLogger = log.child('graphql')
+const resolverLogger = log.child('apollo')
 
 export type NexusRequestHandler = (req: HTTP.IncomingMessage, res: HTTP.ServerResponse) => void
 
+/**
+ * Public interface of the server component
+ */
 export interface Server {
+  /**
+   * Escape hatches to various Nexus server internals.
+   *
+   * These things are available mostly as escape hatches, and maybe a few valid advanced use-cases. If you haven't already/are not sure, consider [opening an issue](https://nxs.li/issues/create/feature) for your use-case. Maybe Nexus can and should provide better first-class support for what you are trying to do!
+   */
+  raw: {
+    /**
+     * The underlying [Node HTTP Server](https://nodejs.org/api/http.html#http_class_http_server) instance.
+     *
+     * Access to this is made available mostly as an escape hatch, and maybe a few valid advanced use-cases. If you haven't already/are not sure, consider [opening an issue](https://nxs.li/issues/create/feature) for your use-case. Maybe Nexus can and should provide better first-class support for what you are trying to do!
+     */
+    http: HTTP.Server
+  }
   express: Express
   handlers: {
-    playground: NexusRequestHandler
     graphql: NexusRequestHandler
   }
+}
+
+interface State {
+  running: boolean
+  httpServer: HTTP.Server
+  createContext: null | (() => ContextAdder)
+  apolloServer: null | ApolloServerExpress
 }
 
 export const defaultState = {
   running: false,
   httpServer: HTTP.createServer(),
   createContext: null,
+  apolloServer: null,
 }
 
 export function create(appState: AppState) {
   const settings = createServerSettingsManager()
   const express = createExpress()
-  const state = { ...defaultState }
+
+  const state: State = { ...defaultState }
 
   const api: Server = {
+    raw: {
+      http: state.httpServer,
+    },
     express,
     handlers: {
-      get playground() {
-        return (
-          assembledGuard(appState, 'app.server.handlers.playground', () => {
-            // todo should be accessing settings from assembled app state settings
-            return wrapHandlerWithErrorHandling(
-              createRequestHandlerPlayground({ graphqlEndpoint: settings.data.path })
-            )
-          }) ?? noop
-        )
-      },
       get graphql() {
         return (
           assembledGuard(appState, 'app.server.handlers.graphql', () => {
-            return wrapHandlerWithErrorHandling(
-              createRequestHandlerGraphQL(appState.assembled!.schema, appState.assembled!.createContext)
+            if (settings.data.cors.enabled) {
+              log.warn('CORS does not work for serverless handlers. Settings will be ignored.')
+            }
+
+            return createRequestHandlerGraphQL(
+              appState.assembled!.schema,
+              appState.assembled!.createContext,
+              {
+                path: settings.data.path,
+                introspection: settings.data.graphql.introspection,
+                playground: settings.data.playground.enabled ? settings.data.playground : false,
+                errorFormatterFn: errorFormatter,
+              }
             )
           }) ?? noop
         )
@@ -73,24 +101,31 @@ export function create(appState: AppState) {
       assemble(loadedRuntimePlugins: Plugin.RuntimeContributions[], schema: GraphQLSchema) {
         state.httpServer.on('request', express)
 
-        if (settings.data.playground) {
-          express.get(
-            settings.data.playground.path,
-            wrapHandlerWithErrorHandling(
-              createRequestHandlerPlayground({ graphqlEndpoint: settings.data.path })
-            )
-          )
-        }
-
         const createContext = createContextCreator(
-          appState.schemaComponent.contextContributors,
+          appState.components.schema.contextContributors,
           loadedRuntimePlugins
         )
 
-        const graphqlHandler = createRequestHandlerGraphQL(schema, createContext)
+        state.apolloServer = new ApolloServerExpress({
+          schema,
+          engine: settings.data.apollo.engine.enabled ? settings.data.apollo.engine : false,
+          context: createContext,
+          introspection: settings.data.graphql.introspection,
+          formatError: errorFormatter,
+          logger: resolverLogger,
+          playground: settings.data.playground.enabled
+            ? {
+                endpoint: settings.data.path,
+                settings: settings.data.playground.settings,
+              }
+            : false,
+        })
 
-        express.post(settings.data.path, wrapHandlerWithErrorHandling(graphqlHandler))
-        express.get(settings.data.path, wrapHandlerWithErrorHandling(graphqlHandler))
+        state.apolloServer.applyMiddleware({
+          app: express,
+          path: settings.data.path,
+          cors: settings.data.cors,
+        })
 
         return { createContext }
       },
@@ -109,7 +144,6 @@ export function create(appState: AppState) {
           host: address.address,
           ip: address.address,
           path: settings.data.path,
-          playgroundPath: settings.data.playground ? settings.data.playground.path : undefined,
         })
         DevMode.sendServerReadySignalToDevModeMaster()
       },
@@ -119,6 +153,7 @@ export function create(appState: AppState) {
           return Promise.resolve()
         }
         await httpClose(state.httpServer)
+        await state.apolloServer?.stop()
         state.running = false
       },
     },
@@ -136,45 +171,33 @@ const wrapHandlerWithErrorHandling = (handler: NexusRequestHandler): NexusReques
     await handler(req, res)
     if (res.statusCode !== 200 && (res as any).error) {
       const error: HttpError = (res as any).error
-      const colorlessMessage = stripAnsi(error.message)
+      const graphqlErrors: GraphQLError[] = error.graphqlErrors
 
-      if (process.env.NEXUS_STAGE === 'dev') {
-        resolverLogger.error(error.stack ?? error.message)
+      if (graphqlErrors.length > 0) {
+        graphqlErrors.forEach(errorFormatter)
       } else {
-        resolverLogger.error('An exception occured in one of your resolver', {
-          error: error.stack ? stripAnsi(error.stack) : colorlessMessage,
+        log.error(error.message, {
+          error,
         })
       }
-
-      // todo bring back payload sanitization for data sent to clients
-      // error.message = colorlessMessage
     }
   }
 }
-
-type AnonymousRequest = Record<string, any>
-
-type AnonymousContext = Record<string, any>
-
-export type ContextCreator<
-  Req extends AnonymousRequest = AnonymousRequest,
-  Context extends AnonymousContext = AnonymousContext
-> = (req: Req) => MaybePromise<Context>
 
 /**
  * Combine all the context contributions defined in the app and in plugins.
  */
 function createContextCreator(
-  contextContributors: ContextContributor[],
+  contextContributors: ContextAdder[],
   plugins: Plugin.RuntimeContributions[]
-): ContextCreator {
-  const createContext: ContextCreator = async (req) => {
+): ContextAdder {
+  const createContext: ContextAdder = async (params) => {
     let context: Record<string, any> = {}
 
     // Integrate context from plugins
     for (const plugin of plugins) {
       if (!plugin.context) continue
-      const contextContribution = await plugin.context.create(req)
+      const contextContribution = await plugin.context.create(params.req)
 
       Object.assign(context, contextContribution)
     }
@@ -182,7 +205,7 @@ function createContextCreator(
     // Integrate context from app context api
     // TODO good runtime feedback to user if something goes wrong
     for (const contextContributor of contextContributors) {
-      const contextContribution = await contextContributor(req as any)
+      const contextContribution = await contextContributor(params)
 
       Object.assign(context, contextContribution)
     }
@@ -193,24 +216,4 @@ function createContextCreator(
   }
 
   return createContext
-}
-
-function httpListen(server: HTTP.Server, options: Net.ListenOptions): Promise<void> {
-  return new Promise((res, rej) => {
-    server.listen(options, () => {
-      res()
-    })
-  })
-}
-
-function httpClose(server: HTTP.Server): Promise<void> {
-  return new Promise((res, rej) => {
-    server.close((err) => {
-      if (err) {
-        rej(err)
-      } else {
-        res()
-      }
-    })
-  })
 }

@@ -1,13 +1,25 @@
 import { Either, isLeft, isRight, left, Left, right, Right, toError, tryCatch } from 'fp-ts/lib/Either'
+import slash from 'slash'
 import { PackageJson } from 'type-fest'
 import { fatal } from '../process'
-import { ContextualError, createContextualError } from '../utils'
+import { exceptionType } from '../utils'
 import { Manifest, Plugin, ValidatedPackageJson } from './types'
 
-export type GetManifestError = ContextualError<{
-  plugin: Plugin
-  name?: string
-}>
+const getManifestException = exceptionType<
+  'get_manifest_error',
+  {
+    plugin: Plugin
+    reason: string
+    name?: string
+  }
+>('get_manifest_error', ({ reason }) => reason)
+
+export type GetManifestError = ReturnType<typeof getManifestException>
+
+// export type GetManifestError = ContextualError<{
+//   plugin: Plugin
+//   name?: string
+// }>
 
 /**
  * Process manifest input into a manifest.
@@ -18,11 +30,13 @@ export type GetManifestError = ContextualError<{
  * defaults and fulfills properties to produce normalized manifest data.
  */
 export function getPluginManifest(plugin: Plugin): Either<GetManifestError, Manifest> {
+  // todo refactor with package-json module
   const errPackageJson = tryCatch(() => require(plugin.packageJsonPath) as PackageJson, toError)
 
   if (isLeft(errPackageJson)) {
     return left(
-      createContextualError(`Failed to read the the package.json file.\n\n${errPackageJson.left.message}`, {
+      getManifestException({
+        reason: `Failed to read the the package.json file.\n\n${errPackageJson.left.message}`,
         plugin,
       })
     )
@@ -32,7 +46,8 @@ export function getPluginManifest(plugin: Plugin): Either<GetManifestError, Mani
 
   if (!packageJson.name) {
     return left(
-      createContextualError(`\`name\` property is missing in package.json`, {
+      getManifestException({
+        reason: `\`name\` property is missing in the package.json`,
         plugin,
         name: packageJson.name!,
       })
@@ -41,8 +56,9 @@ export function getPluginManifest(plugin: Plugin): Either<GetManifestError, Mani
 
   if (!packageJson.main) {
     return left(
-      createContextualError(`\`main\` property is missing in package.json`, {
+      getManifestException({
         plugin,
+        reason: `\`main\` property is missing in the package.json`,
         name: packageJson.name!,
       })
     )
@@ -50,14 +66,35 @@ export function getPluginManifest(plugin: Plugin): Either<GetManifestError, Mani
 
   const validatedPackageJson = packageJson as ValidatedPackageJson
 
+  let worktime = null
+  let runtime = null
+  let testtime = null
+
+  if (plugin.worktime) {
+    plugin.worktime.module = slash(plugin.worktime.module)
+    worktime = plugin.worktime
+  }
+
+  if (plugin.runtime) {
+    plugin.runtime.module = slash(plugin.runtime.module)
+    runtime = plugin.runtime
+  }
+
+  if (plugin.testtime) {
+    plugin.testtime.module = slash(plugin.testtime.module)
+    testtime = plugin.testtime
+  }
+
+  const packageJsonPath = slash(plugin.packageJsonPath)
+
   return right({
     name: validatedPackageJson.name,
     settings: (plugin as any).settings ?? null,
-    packageJsonPath: plugin.packageJsonPath,
+    packageJsonPath: packageJsonPath,
     packageJson: validatedPackageJson,
-    worktime: plugin.worktime ?? null,
-    testtime: plugin.testtime ?? null,
-    runtime: plugin.runtime ?? null,
+    worktime,
+    testtime,
+    runtime,
   })
 }
 

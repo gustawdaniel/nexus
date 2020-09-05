@@ -27,18 +27,22 @@ function cleanTokens(tokens: any[]) {
   return tokens
 }
 
+const propList = ['copy', 'bash-symbol']
+
 const Code = ({ children, className, ...props }: PreCodeProps) => {
   let language = className && className.replace(/language-/, '')
-  if (language == undefined) {
-    language = 'bash'
+  let breakWords = false
+
+  if (propList.includes(language)) {
+    breakWords = true
   }
+
   const code = stringify(children)
 
   const hasCopy = props['copy'] || language === 'copy'
-  const hasLineNo = props['line-number'] || language === 'line-number'
+  const hasNoLine = props['no-lines'] || language === 'no-lines'
   const hasTerminalSymbol = props['bash-symbol'] || language === 'bash-symbol'
-
-  const tokenCopyClass = hasCopy ? 'has-copy-button' : ''
+  const tokenCopyClass = `${hasCopy ? 'has-copy-button' : ''} ${breakWords ? 'break-words' : ''}`
 
   return (
     <>
@@ -61,18 +65,21 @@ const Code = ({ children, className, ...props }: PreCodeProps) => {
                   }
 
                   let isDiff = false
+                  // let isHidden = false
                   let diffSymbol = ''
 
                   const diffBgColorMap: any = {
                     '+': 'var(--code-added-bg-color)',
                     '-': 'var(--code-deleted-bg-color)',
                     '|': 'var(--code-highlight-bg-color)',
+                    '✎': 'var(--code-edit-bg-color)',
                   }
 
                   const symColorMap: any = {
                     '+': 'var(--code-added-color)',
                     '-': 'var(--code-deleted-color)',
                     '|': 'var(--code-highlight-color)',
+                    '✎': 'var(--code-highlight-color)',
                   }
 
                   if (
@@ -80,13 +87,15 @@ const Code = ({ children, className, ...props }: PreCodeProps) => {
                       line[0].content.length &&
                       (line[0].content[0] === '+' ||
                         line[0].content[0] === '-' ||
-                        line[0].content[0] === '|')) ||
+                        line[0].content[0] === '|' ||
+                        line[0].content[0] === '✎')) ||
                     (line[0] &&
                       line[0].content === '' &&
                       line[1] &&
                       (line[1].content === '+' ||
                         line[1].content === '-' ||
-                        line[1].content === '|'))
+                        line[1].content === '|' ||
+                        line[1].content === '✎'))
                   ) {
                     diffSymbol =
                       line[0] && line[0].content.length ? line[0].content[0] : line[1].content
@@ -104,7 +113,7 @@ const Code = ({ children, className, ...props }: PreCodeProps) => {
                   return (
                     <Line key={line + i} {...lineProps}>
                       {hasTerminalSymbol && !isDiff && <LineNo>$</LineNo>}
-                      {hasLineNo && !isDiff && <LineNo>{i + 1}</LineNo>}
+                      {!hasTerminalSymbol && !isDiff && !hasNoLine && <LineNo>{i + 1}</LineNo>}
                       {isDiff && (
                         <LineNo style={{ color: lineClass.symbColor }}>
                           {diffSymbol !== '|' ? diffSymbol : i + 1}
@@ -114,10 +123,11 @@ const Code = ({ children, className, ...props }: PreCodeProps) => {
                         {line.map((token: any, key: any) => {
                           if (isDiff) {
                             if (
-                              ((key === 0 || key === 1) &&
-                                (token.content.charAt(0) === '+' ||
-                                  token.content.charAt(0) === '-')) ||
-                              token.content.charAt(0) === '|'
+                              (key === 0 || key === 1) &&
+                              (token.content.charAt(0) === '+' ||
+                                token.content.charAt(0) === '-' ||
+                                token.content.charAt(0) === '|' || 
+                                token.content.charAt(0) === '✎')
                             ) {
                               return (
                                 <span
@@ -167,34 +177,30 @@ const Pre = styled.pre`
   webkit-overflow-scrolling: touch;
 `
 const Line = styled.div`
-  display: table-row;
+  display: block;
 `
 
 const LineNo = styled.span`
   font-weight: 500;
   line-height: 24px;
   color: var(--code-linenum-color);
-  display: table-cell;
+  display: inline-block;
   text-align: right;
-  padding-left: 1em;
+  // padding-left: 1em;
   user-select: none;
   width: 24px;
 `
 
 const LineContent = styled.span`
-  display: table-cell;
   padding: 0 1em;
-  white-space: break-spaces;
+  &.break-words {
+    display: inline-table;
+    white-space: break-spaces;
+    width: 95%;
+  }
+
   &.token-line {
     line-height: 1.3rem;
     height: 1.3rem;
-
-    .has-copy-button {
-      width: 95%;
-      overflow-x: auto;
-      &::-webkit-scrollbar {
-        height: 0;
-      }
-    }
   }
 `

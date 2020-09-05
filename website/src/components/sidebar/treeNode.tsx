@@ -4,6 +4,8 @@ import ArrowRight from '../../icons/ArrowRight'
 import ArrowDown from '../../icons/ArrowDown'
 import Link from '../link'
 import { urlGenerator } from '../../utils/urlGenerator'
+import { useLocation } from '@reach/router'
+import { withPrefix } from 'gatsby'
 
 const List = styled.ul`
   list-style: none;
@@ -16,9 +18,9 @@ const List = styled.ul`
 `
 
 const ListItem = styled.li`
-  font-size: 1rem;
-  line-height: 16px;
-  margin-bottom: 16px;
+  font-size: 14px;
+  line-height: 1.25;
+  margin-bottom: 12px;
   position: relative;
   a {
     transition: color 150ms ease 0s;
@@ -59,9 +61,13 @@ const ListItem = styled.li`
       background: transparent;
       position: absolute;
       left: -15px;
-      top: 5px;
+      top: 7px;
       padding: 0;
       border: 0;
+
+      &.more-left {
+        left: 10px;
+      }
 
       .right,
       .down {
@@ -92,7 +98,7 @@ const ListItem = styled.li`
     }
   }
   .active-item {
-    color: var(--main-font-color) !important;
+    color: var(--nav-highlight-color) !important;
     font-weight: 700;
     @media (min-width: 0px) and (max-width: 1024px) {
       color: var(--border-color) !important;
@@ -101,7 +107,7 @@ const ListItem = styled.li`
   &.top-level {
     margin-top: 2rem;
     > a {
-      font-size: 20px;
+      font-size: 1rem;
       color: var(--main-font-color) !important;
       font-weight: 600;
       letter-spacing: -0.01em;
@@ -123,13 +129,16 @@ const ListItem = styled.li`
     color: var(--list-bullet-color) !important;
     text-transform: uppercase;
     font-weight: bold;
-    font-size: 14px;
+    font-size: 12px;
     &:hover {
       color: var(--list-bullet-color) !important;
     }
   }
   &.last-level {
     padding-left: 24px;
+    // &.more-padding {
+    //   padding-left: 30px;
+    // }
   }
   .collapse-title {
     cursor: pointer;
@@ -144,6 +153,7 @@ const TreeNode = ({
   setCollapsed,
   collapsed,
   url,
+  slug,
   title,
   items,
   label,
@@ -152,17 +162,32 @@ const TreeNode = ({
   duration,
   experimental,
   lastLevel,
+  hidePage,
+  codeStyle,
 }: any) => {
   const isCollapsed = collapsed[label]
   const collapse = () => {
-    setCollapsed(label)
+    Object.keys(collapsed).map(lbl => {
+      if (lbl !== label) {
+        collapsed[lbl] = collapsed[lbl] == false ? (collapsed[lbl] = true) : collapsed[lbl]
+      }
+    })
+    setCollapsed(label, false)
+  }
+  const location = useLocation()
+
+  const justExpand = (e: any) => {
+    setCollapsed(label, true)
+    e.preventDefault()
+    e.stopPropagation()
   }
 
   const hasChildren = items.length !== 0
+  const level = slug ? slug.split('/').indexOf(label) : ''
 
   const calculatedClassName = `${className || ''} ${topLevel ? 'top-level' : ''} ${
     staticLink ? 'static-link' : ''
-  } ${lastLevel ? 'last-level' : ''}`
+  } ${lastLevel ? 'last-level' : ''} ${level > 2 ? 'more-padding' : ''}`
 
   items.sort((a: any, b: any) => {
     if (a.label < b.label) {
@@ -187,25 +212,32 @@ const TreeNode = ({
     setIsOpen(isCollapsed ? 'close' : 'open')
   }, [isCollapsed])
 
+  const isCurrent = location && slug && location.pathname.includes(urlGenerator(slug))
+
   return url === '/' ? null : (
     <ListItem className={calculatedClassName}>
-      {title && label !== 'index' && url !== '/01-getting-started/04-example' && (
+      {title && label !== 'index' && !hidePage && (
         <Link
-          to={url.split('/').includes('index') ? null : `${urlGenerator(url)}`}
+          to={staticLink || topLevel ? null : url}
           activeClassName="active-item"
-          partiallyActive={true}
+          className={isCurrent ? 'active-item' : 'non-active'}
+          id={withPrefix(url)}
         >
           {hasExpandButton ? (
-            <span onClick={collapse} className="collapse-title">
-              <button aria-label="collapse" className="item-collapser">
+            <span className="collapse-title" onClick={collapse}>
+              <button
+                aria-label="collapse"
+                className={`item-collapser ${level > 2 ? 'more-left' : ''}`}
+                onClick={justExpand}
+              >
                 {/* Fix for issue https://github.com/prisma/prisma2-docs/issues/161 */}
                 <ArrowRight className={`right ${isOpen}`} />
                 <ArrowDown className={`down ${isOpen}`} />
               </button>
-              {title}
+              <span className={`${codeStyle ? 'inline-code' : ''}`}>{title}</span>
             </span>
           ) : (
-            <span>{title}</span>
+            <span className={`${codeStyle ? 'inline-code' : ''}`}>{title}</span>
           )}
           {duration && <span className="tag">{duration}</span>}
           {experimental && <span className="tag small">Experimental</span>}
